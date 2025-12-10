@@ -1,225 +1,156 @@
-import io
-import csv
-import hashlib
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Cloud Cost Tag Governance Simulator", layout="wide")
+st.title("AWS Lambda Cost Analysis Dashboard")
 
-# =========================================================
-# Forgiving CSV Loader (handles quoted-whole-line CSV too)
-# =========================================================
-def load_csv_forgiving(uploaded_file_or_path):
-    def _read(obj):
-        return pd.read_csv(obj, low_memory=False)
+# -------------------------------------------------------
+# File Upload
+# -------------------------------------------------------
 
-    try:
-        df = _read(uploaded_file_or_path)
-        if df.shape[1] > 1:
-            return df
-    except Exception:
-        pass
+uploaded_file = st.file_uploader("Upload Lambda CSV file", type=["csv"])
 
-    if hasattr(uploaded_file_or_path, "getvalue"):
-        raw = uploaded_file_or_path.getvalue().decode("utf-8", errors="replace")
-    else:
-        with open(uploaded_file_or_path, "r", encoding="utf-8", errors="replace") as f:
-            raw = f.read()
+if uploaded_file is None:
+    st.warning("Please upload a CSV to begin.")
+    st.stop()
 
-    fixed_lines = []
-    for line in raw.splitlines():
-        s = line.strip()
-        if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
-            s = s[1:-1]
-        fixed_lines.append(s)
-    fixed_text = "\n".join(fixed_lines)
-    buf = io.StringIO(fixed_text)
-    return pd.read_csv(buf, low_memory=False)
+df = pd.read_csv(uploaded_file)
 
-# =========================================================
-# Schema helpers
-# =========================================================
-REQUIRED_COLUMNS = [
-    "ResourceID","Service","Region","Department","Project","Environment","Owner",
-    "CostCenter","CreatedBy","MonthlyCostUSD","Tagged"
+st.subheader("Raw Data")
+st.dataframe(df)
+
+# =======================================================
+# Exercise 1: Identify top cost contributors (80% rule)
+# =======================================================
+
+st.header("Exercise 1: Top Cost Contributors")
+
+df_sorted = df.sort_values("CostUSD", ascending=False)
+df_sorted["CumulativeCost"] = df_sorted["CostUSD"].cumsum()
+total_spend = df["CostUSD"].sum()
+df_sorted["CumulativePct"] = df_sorted["CumulativeCost"] / total_spend
+
+top_80 = df_sorted[df_sorted["CumulativePct"] <= 0.8]
+
+st.subheader("Functions contributing to 80% of spend")
+st.dataframe(top_80[["FunctionName", "CostUSD", "CumulativePct"]])
+
+# ----- PLOT: Cost vs Invocations -----
+fig, ax = plt.subplots()
+ax.scatter(df["InvocationsPerMonth"], df["CostUSD"])
+ax.set_xlabel("Invocations per Month")
+ax.set_ylabel("Cost (USD)")
+ax.set_title("Cost vs Invocation Frequency")
+st.pyplot(fig)
+
+# =======================================================
+# Exercise 2: Memory right-sizing
+# =======================================================
+
+st.header("Exercise 2: Memory Right-Sizing")
+
+LOW_DURATION_MS = 100
+HIGH_MEMORY_MB = 1024
+
+memory_oversized = df[
+    (df["AvgDurationMs"] < LOW_DURATION_MS) &
+    (df["MemoryMB"] >= HIGH_MEMORY_MB)
 ]
-TAG_FIELDS = ["Department","Project","Environment","Owner","CostCenter","CreatedBy"]
 
-def ensure_cost_allocation_schema(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = df.columns.str.strip()
-    for c in REQUIRED_COLUMNS:
-        if c not in df.columns:
-            df[c] = np.nan
-    df["Tagged"] = df["Tagged"].astype(str).str.strip().str.title()  # 'Yes'/'No'
-    df["Service"] = df["Service"].astype(str).str.strip()
-    df["Region"] = df["Region"].astype(str).str.strip()
-    df["MonthlyCostUSD"] = pd.to_numeric(df["MonthlyCostUSD"], errors="coerce")
-    return df
+st.subheader("Potential memory overprovision (low duration, high memory)")
+st.dataframe(
+    memory_oversized[["FunctionName", "AvgDurationMs", "MemoryMB", "CostUSD"]])
 
-def tag_completeness_score(row: pd.Series) -> int:
-    score = 0
-    for f in TAG_FIELDS:
-        v = row.get(f, None)
-        if pd.notna(v) and str(v).strip() != "":
-            score += 1
-    return score
+# ---- Cost Projection Function ----
 
-def add_computed_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["TagCompletenessScore"] = df.apply(tag_completeness_score, axis=1)
-    df["IsUntagged"] = df["Tagged"].astype(str).str.title().eq("No")
-    return df
 
-def fmt_pct(x):
-    return f"{x:.1f}%" if pd.notna(x) else "—"
+def projected_cost(row, new_memory_mb):
+    duration_sec = row["AvgDurationMs"] / 1000
+    inv = row["InvocationsPerMonth"]
 
-# =========================================================
-# Load dataset
-# =========================================================
-st.title("💸 Cloud Cost Tag Governance Simulator (INFO49971)")
+    old_gbsec = row["GBSeconds"]
+    cost_per_gbsec = row["CostUSD"] / old_gbsec
 
-uploaded_file = st.file_uploader("Upload CloudMart Resource Tagging Dataset (CSV)", type=["csv"])
+    new_gbsec = (new_memory_mb / 1024) * duration_sec * inv
+    return new_gbsec * cost_per_gbsec
 
-if uploaded_file is not None:
-    df_raw = load_csv_forgiving(uploaded_file)
-else:
-    st.info("No file uploaded. You can still explore the app with a tiny example.")
-    demo_csv = io.StringIO(
-        """AccountID,ResourceID,Service,Region,Department,Project,Environment,Owner,CostCenter,CreatedBy,MonthlyCostUSD,Tagged
-1001,i-001,EC2,us-east-1,Marketing,CampaignApp,Prod,j.smith@cloudmart.com,CC101,Terraform,120,Yes
-1001,i-002,EC2,us-east-1,Marketing,CampaignApp,Dev,,CC101,Terraform,80,No
-1001,s3-001,S3,us-east-1,Marketing,AdsAPI,Prod,j.smith@cloudmart.com,CC101,Jenkins,60,Yes
-1001,s3-002,S3,us-east-1,Marketing,AdsAPI,Dev,,CC101,Manual,25,No
-"""
+
+if not memory_oversized.empty:
+    memory_oversized["ProjectedCost_512MB"] = memory_oversized.apply(
+        lambda r: projected_cost(r, 512), axis=1
     )
-    df_raw = pd.read_csv(demo_csv)
 
-df = ensure_cost_allocation_schema(df_raw)
-df = add_computed_columns(df)
-
-# --- FIXED: update session state when new file uploaded ---
-def _fingerprint_from_upload(up):
-    if up is None:
-        return "demo"
-    try:
-        b = up.getvalue()
-    except Exception:
-        b = b""
-    return "upload:" + hashlib.md5(b).hexdigest()
-
-data_fp = _fingerprint_from_upload(uploaded_file)
-if "data_fingerprint" not in st.session_state or st.session_state.get("data_fingerprint") != data_fp:
-    st.session_state.data_fingerprint = data_fp
-    st.session_state.df_original = df.copy()
-    st.session_state.df_remediated = df.copy()
-    st.toast("✅ Loaded dataset successfully!", icon="📂")
-
-# =========================================================
-# Helper functions
-# =========================================================
-def apply_filters(dfin: pd.DataFrame, f_service, f_region, f_dept, f_env) -> pd.DataFrame:
-    d = dfin.copy()
-    if f_service != "(All)":
-        d = d[d["Service"] == f_service]
-    if f_region != "(All)":
-        d = d[d["Region"] == f_region]
-    if f_dept != "(All)":
-        d = d[d["Department"] == f_dept]
-    if f_env != "(All)":
-        d = d[d["Environment"] == f_env]
-    return d
-
-def tagging_metrics(dfin: pd.DataFrame):
-    d = dfin.copy()
-    total = len(d)
-    tagged_counts = d["Tagged"].value_counts(dropna=False)
-    n_tagged = int(tagged_counts.get("Yes", 0))
-    n_untagged = int(tagged_counts.get("No", 0))
-    pct_untagged = (n_untagged / total * 100.0) if total > 0 else np.nan
-    total_cost = pd.to_numeric(d["MonthlyCostUSD"], errors="coerce").sum()
-    cost_by_tag = d.groupby("Tagged", dropna=False)["MonthlyCostUSD"].sum(min_count=1)
-    untagged_cost = float(cost_by_tag.get("No", 0.0))
-    pct_untagged_cost = (untagged_cost / total_cost * 100.0) if total_cost > 0 else np.nan
-    return {
-        "total": total,
-        "n_tagged": n_tagged,
-        "n_untagged": n_untagged,
-        "pct_untagged": pct_untagged,
-        "total_cost": total_cost,
-        "untagged_cost": untagged_cost,
-        "pct_untagged_cost": pct_untagged_cost,
-    }
-
-# =========================================================
-# Global filters
-# =========================================================
-with st.expander("🔎 Global Filters"):
-    df_all = st.session_state.df_remediated
-    svc_opts = ["(All)"] + sorted(df_all["Service"].dropna().unique().tolist())
-    reg_opts = ["(All)"] + sorted(df_all["Region"].dropna().unique().tolist())
-    dept_opts = ["(All)"] + sorted(df_all["Department"].dropna().unique().tolist())
-    env_opts = ["(All)"] + sorted(df_all["Environment"].dropna().unique().tolist())
-    f_service = st.selectbox("Service", svc_opts, index=0)
-    f_region = st.selectbox("Region", reg_opts, index=0)
-    f_dept = st.selectbox("Department", dept_opts, index=0)
-    f_env = st.selectbox("Environment", env_opts, index=0)
-
-# =========================================================
-# Tabs
-# =========================================================
-tabs = st.tabs([
-    "1) Data Exploration",
-    "2) Cost Visibility",
-    "3) Tagging Compliance",
-])
-
-# ------------------------------
-# Tab 1: Data Exploration
-# ------------------------------
-with tabs[0]:
-    st.header("Task Set 1 – Data Exploration")
-    df_f = apply_filters(st.session_state.df_remediated, f_service, f_region, f_dept, f_env)
-    st.subheader("First 5 Rows")
-    st.dataframe(df_f.head(), use_container_width=True)
-    st.subheader("Missing Values per Column")
-    st.write(df_f.isnull().sum())
-    m = tagging_metrics(df_f)
-    st.metric("Untagged %", fmt_pct(m["pct_untagged"]))
-
-# ------------------------------
-# Tab 2: Cost Visibility
-# ------------------------------
-with tabs[1]:
-    st.header("Task Set 2 – Cost Visibility")
-    df_f = apply_filters(st.session_state.df_remediated, f_service, f_region, f_dept, f_env)
-    m = tagging_metrics(df_f)
-    st.metric("Total Cost", f"${m['total_cost']:,.2f}")
-    st.metric("Untagged Cost", f"${m['untagged_cost']:,.2f}")
-    st.metric("% Untagged Cost", fmt_pct(m["pct_untagged_cost"]))
-    cost_by_tag = df_f.groupby("Tagged", dropna=False)["MonthlyCostUSD"].sum(min_count=1).reset_index()
-    st.dataframe(cost_by_tag)
-    fig = px.pie(cost_by_tag, names="Tagged", values="MonthlyCostUSD", title="Cost Share by Tagging")
-    st.plotly_chart(fig, use_container_width=True)
-
-# ------------------------------
-# Tab 3: Tagging Compliance
-# ------------------------------
-with tabs[2]:
-    st.header("Task Set 3 – Tagging Compliance")
-    df_f = apply_filters(st.session_state.df_remediated, f_service, f_region, f_dept, f_env)
-    df_f["TagCompletenessScore"] = df_f.apply(tag_completeness_score, axis=1)
+    st.subheader("Projected Cost if Memory Reduced to 512 MB")
     st.dataframe(
-        df_f[["ResourceID","Service","Department","Project","Environment","Owner","CostCenter","CreatedBy","TagCompletenessScore"]],
-        use_container_width=True
-    )
-    st.download_button(
-        "Download Full Processed Dataset (All Rows)",
-        data=df_f.to_csv(index=False).encode("utf-8"),
-        file_name="cloudmart_processed.csv",
-        mime="text/csv"
-    )
+        memory_oversized[["FunctionName", "CostUSD", "ProjectedCost_512MB"]])
 
-st.caption("✅ Fixed version: loads *all rows* from uploaded CSV and updates session state.")
+
+# =======================================================
+# Exercise 3: Provisioned Concurrency Optimization
+# =======================================================
+
+st.header("Exercise 3: Provisioned Concurrency Optimization")
+
+pc = df[df["ProvisionedConcurrency"] > 0]
+
+st.subheader("Functions with Provisioned Concurrency")
+st.dataframe(
+    pc[["FunctionName", "ProvisionedConcurrency", "ColdStartRate", "CostUSD"]])
+
+st.write("**Guidance:** If ColdStartRate < 0.01, Provisioned Concurrency may not be needed.")
+
+
+# =======================================================
+# Exercise 4: Detect unused or low-value workloads
+# =======================================================
+
+st.header("Exercise 4: Detect Unused / Low-Value Workloads")
+
+total_inv = df["InvocationsPerMonth"].sum()
+low_value = df[
+    (df["InvocationsPerMonth"] / total_inv < 0.01) &
+    (df["CostUSD"] > df["CostUSD"].median())
+]
+
+st.subheader("Low invocation (<1%) but high cost functions")
+st.dataframe(low_value[["FunctionName", "InvocationsPerMonth", "CostUSD"]])
+
+
+# =======================================================
+# Exercise 5: Cost Forecasting Model
+# =======================================================
+
+st.header("Exercise 5: Cost Forecasting Model")
+
+pricing_coeff = 0.0000000021  # simplified placeholder
+
+df["ForecastCost"] = (
+    df["InvocationsPerMonth"] *
+    (df["AvgDurationMs"] / 1000) *
+    (df["MemoryMB"] / 1024) *
+    pricing_coeff
+    + df["DataTransferGB"] * 0.08
+)
+
+st.subheader("Forecasted Cost Estimate")
+st.dataframe(df[["FunctionName", "CostUSD", "ForecastCost"]])
+
+
+# =======================================================
+# Exercise 6: Containerization Candidates
+# =======================================================
+
+st.header("Exercise 6: Containerization Candidates")
+
+container_candidates = df[
+    (df["AvgDurationMs"] > 3000) &
+    (df["MemoryMB"] > 2048) &
+    (df["InvocationsPerMonth"] < 100000)
+]
+
+st.subheader("Long-running, high-memory, low-frequency functions")
+st.dataframe(container_candidates[[
+    "FunctionName", "AvgDurationMs", "MemoryMB", "InvocationsPerMonth", "CostUSD"
+]])
+
+st.success("Analysis Complete.")
