@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 
 st.title("AWS Lambda Cost Analysis Dashboard")
 
@@ -32,16 +31,10 @@ df_sorted["CumulativePct"] = df_sorted["CumulativeCost"] / total_spend
 
 top_80 = df_sorted[df_sorted["CumulativePct"] <= 0.8]
 
-st.subheader("Functions contributing to 80% of spend")
+st.subheader("Functions contributing to 80% of total spend")
 st.dataframe(top_80[["FunctionName", "CostUSD", "CumulativePct"]])
 
-# ----- PLOT: Cost vs Invocations -----
-fig, ax = plt.subplots()
-ax.scatter(df["InvocationsPerMonth"], df["CostUSD"])
-ax.set_xlabel("Invocations per Month")
-ax.set_ylabel("Cost (USD)")
-ax.set_title("Cost vs Invocation Frequency")
-st.pyplot(fig)
+st.info("Plot removed as requested.")
 
 # =======================================================
 # Exercise 2: Memory right-sizing
@@ -59,7 +52,8 @@ memory_oversized = df[
 
 st.subheader("Potential memory overprovision (low duration, high memory)")
 st.dataframe(
-    memory_oversized[["FunctionName", "AvgDurationMs", "MemoryMB", "CostUSD"]])
+    memory_oversized[["FunctionName", "AvgDurationMs", "MemoryMB", "CostUSD"]]
+)
 
 # ---- Cost Projection Function ----
 
@@ -82,7 +76,8 @@ if not memory_oversized.empty:
 
     st.subheader("Projected Cost if Memory Reduced to 512 MB")
     st.dataframe(
-        memory_oversized[["FunctionName", "CostUSD", "ProjectedCost_512MB"]])
+        memory_oversized[["FunctionName", "CostUSD", "ProjectedCost_512MB"]]
+    )
 
 
 # =======================================================
@@ -95,7 +90,8 @@ pc = df[df["ProvisionedConcurrency"] > 0]
 
 st.subheader("Functions with Provisioned Concurrency")
 st.dataframe(
-    pc[["FunctionName", "ProvisionedConcurrency", "ColdStartRate", "CostUSD"]])
+    pc[["FunctionName", "ProvisionedConcurrency", "ColdStartRate", "CostUSD"]]
+)
 
 st.write("**Guidance:** If ColdStartRate < 0.01, Provisioned Concurrency may not be needed.")
 
@@ -107,12 +103,13 @@ st.write("**Guidance:** If ColdStartRate < 0.01, Provisioned Concurrency may not
 st.header("Exercise 4: Detect Unused / Low-Value Workloads")
 
 total_inv = df["InvocationsPerMonth"].sum()
+
 low_value = df[
     (df["InvocationsPerMonth"] / total_inv < 0.01) &
     (df["CostUSD"] > df["CostUSD"].median())
 ]
 
-st.subheader("Low invocation (<1%) but high cost functions")
+st.subheader("Low invocation (<1%) but high cost workloads")
 st.dataframe(low_value[["FunctionName", "InvocationsPerMonth", "CostUSD"]])
 
 
@@ -122,7 +119,7 @@ st.dataframe(low_value[["FunctionName", "InvocationsPerMonth", "CostUSD"]])
 
 st.header("Exercise 5: Cost Forecasting Model")
 
-pricing_coeff = 0.0000000021  # simplified placeholder
+pricing_coeff = 0.0000000021  # simplified placeholder coefficient
 
 df["ForecastCost"] = (
     df["InvocationsPerMonth"] *
@@ -149,8 +146,8 @@ container_candidates = df[
 ]
 
 st.subheader("Long-running, high-memory, low-frequency functions")
-st.dataframe(container_candidates[[
-    "FunctionName", "AvgDurationMs", "MemoryMB", "InvocationsPerMonth", "CostUSD"
-]])
+st.dataframe(container_candidates[
+    ["FunctionName", "AvgDurationMs", "MemoryMB", "InvocationsPerMonth", "CostUSD"]
+])
 
 st.success("Analysis Complete.")
